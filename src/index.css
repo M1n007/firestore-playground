@@ -1,0 +1,16 @@
+html, body, #root {
+  margin: 0;
+  height: 100%;
+}
+
+body {
+  font-family: "Inter", "Sora", "Segoe UI", system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background: #0b1118;
+  color: #e6edf7;
+}
+
+code {
+  font-family: "JetBrains Mono", "IBM Plex Mono", "SFMono-Regular", Menlo, Monaco, Consolas, monospace;
+}

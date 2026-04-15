@@ -1,0 +1,27 @@
+{
+  "short_name": "Firestore Playground",
+  "name": "Firestore Playground — Firebase Firestore GUI",
+  "description": "Browser-based GUI for Cloud Firestore. Browse, search, probe, and edit documents without writing code.",
+  "icons": [
+    {
+      "src": "favicon.ico",
+      "sizes": "64x64 32x32 24x24 16x16",
+      "type": "image/x-icon"
+    },
+    {
+      "src": "logo192.png",
+      "type": "image/png",
+      "sizes": "192x192"
+    },
+    {
+      "src": "logo512.png",
+      "type": "image/png",
+      "sizes": "512x512"
+    }
+  ],
+  "start_url": ".",
+  "display": "standalone",
+  "theme_color": "#0b1118",
+  "background_color": "#0b1118",
+  "categories": ["developer", "utilities", "productivity"]
+}
