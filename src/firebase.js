@@ -1,20 +1,27 @@
 import { deleteApp, initializeApp } from 'firebase/app';
 import {
+  Bytes,
+  GeoPoint,
   Timestamp,
   addDoc,
   collection,
+  collectionGroup,
   deleteDoc,
-  documentId,
   doc,
+  documentId,
   getDoc,
   getDocs,
   getFirestore,
   limit,
+  onSnapshot,
   orderBy,
   query,
+  serverTimestamp,
   setDoc,
   startAfter,
-  updateDoc
+  updateDoc,
+  where,
+  writeBatch
 } from 'firebase/firestore';
 
 const createFirestoreConnection = async (firebaseConfig, existingApp = null) => {
@@ -31,19 +38,26 @@ const createFirestoreConnection = async (firebaseConfig, existingApp = null) => 
 export default createFirestoreConnection;
 
 export {
+  Bytes,
+  GeoPoint,
   Timestamp,
   addDoc,
   collection,
+  collectionGroup,
   deleteApp,
   deleteDoc,
-  documentId,
   doc,
+  documentId,
   getDoc,
   getDocs,
   limit,
+  onSnapshot,
   orderBy,
   query,
+  serverTimestamp,
   setDoc,
   startAfter,
-  updateDoc
+  updateDoc,
+  where,
+  writeBatch
 };
