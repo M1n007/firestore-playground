@@ -21,9 +21,29 @@ import createFirestoreConnection, {
   setDoc,
   startAfter,
   updateDoc,
-  where
+  where,
+  writeBatch
 } from "./firebase";
 import { DocumentReference } from "firebase/firestore";
+
+const QUERY_HISTORY_KEY = "firestore-playground-history";
+const MAX_QUERY_HISTORY = 20;
+
+const readQueryHistory = () => {
+  try {
+    const raw = window.localStorage.getItem(QUERY_HISTORY_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+};
+
+const writeQueryHistory = (list) => {
+  try {
+    window.localStorage.setItem(QUERY_HISTORY_KEY, JSON.stringify(list));
+  } catch {}
+};
 
 const CONFIG_PLACEHOLDER = `{
   apiKey: "YOUR_API_KEY",
@@ -379,6 +399,8 @@ const matchesSearchFilter = (data, searchField, searchValue, searchMode) => {
 
 const createMessageState = (message, type) => ({ message, type });
 
+const pluralize = (count, singular, plural) => `${count} ${count === 1 ? singular : (plural || singular + "s")}`;
+
 const getInitialTheme = () => {
   if (typeof window === "undefined") {
     return "dark";
@@ -498,6 +520,34 @@ const App = () => {
   const [probingSubs, setProbingSubs] = useState(false);
   const [pendingWrite, setPendingWrite] = useState(null);
   const [copyMenuOpen, setCopyMenuOpen] = useState(false);
+  const [selectedIds, setSelectedIds] = useState(new Set());
+  const [editorMode, setEditorMode] = useState("json");
+  const [tabs, setTabs] = useState([]);
+  const [activeTabId, setActiveTabId] = useState(null);
+  const [queryHistory, setQueryHistory] = useState(readQueryHistory);
+  const [dialog, setDialog] = useState(null);
+  const [promptValue, setPromptValue] = useState("");
+
+  const confirmAction = ({ title, message, confirmLabel = "Confirm", cancelLabel = "Cancel", variant = "default" }) => (
+    new Promise((resolve) => {
+      setDialog({
+        kind: "confirm", title, message, confirmLabel, cancelLabel, variant,
+        onConfirm: () => { setDialog(null); resolve(true); },
+        onCancel: () => { setDialog(null); resolve(false); }
+      });
+    })
+  );
+
+  const promptAction = ({ title, message, defaultValue = "", placeholder = "", confirmLabel = "Save" }) => (
+    new Promise((resolve) => {
+      setPromptValue(defaultValue);
+      setDialog({
+        kind: "prompt", title, message, placeholder, confirmLabel,
+        onConfirm: (value) => { setDialog(null); resolve(value); },
+        onCancel: () => { setDialog(null); resolve(null); }
+      });
+    })
+  );
 
   const [configInput, setConfigInput] = useState(DEFAULT_CONFIG_INPUT);
   const [connectionStatus, setConnectionStatus] = useState(createMessageState("", ""));
@@ -677,6 +727,9 @@ const App = () => {
     setLiveMode(false);
     setSubCollections([]);
     setHasMore(false);
+    setSelectedIds(new Set());
+    setTabs([]);
+    setActiveTabId(null);
     cursorRef.current = null;
     loadedDocDataRef.current = null;
     setConnectionStatus(createMessageState("Disconnected.", "info"));
@@ -686,11 +739,72 @@ const App = () => {
   const loadedDocDataRef = useRef(null);
 
   const loadDocumentIntoEditor = (path, data, sourceLabel) => {
+    const json = JSON.stringify(serializeFirestoreValue(data), null, 2);
     setDocumentPath(path);
-    setEditorValue(JSON.stringify(serializeFirestoreValue(data), null, 2));
+    setEditorValue(json);
     loadedDocDataRef.current = data;
     setDocumentStatus(createMessageState(`Loaded ${sourceLabel} "${path}".`, "success"));
     probeSubCollections(path);
+    upsertTab(path, json);
+  };
+
+  const upsertTab = (path, editorJson) => {
+    setTabs((prev) => {
+      const existing = prev.find((t) => t.path === path);
+      if (existing) {
+        const updated = prev.map((t) => (t.path === path ? { ...t, editorValue: editorJson } : t));
+        return updated;
+      }
+      return [...prev, { id: `tab-${Date.now()}-${Math.random()}`, path, editorValue: editorJson }];
+    });
+    setActiveTabId((prev) => {
+      const match = (tabs.find((t) => t.path === path));
+      if (match) return match.id;
+      return prev;
+    });
+  };
+
+  useEffect(() => {
+    if (!documentPath) return;
+    const existing = tabs.find((t) => t.path === documentPath);
+    if (existing && existing.id !== activeTabId) setActiveTabId(existing.id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [documentPath, tabs.length]);
+
+  useEffect(() => {
+    if (!activeTabId) return;
+    setTabs((prev) => prev.map((t) => (t.id === activeTabId ? { ...t, editorValue } : t)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editorValue]);
+
+  const switchTab = (tabId) => {
+    const tab = tabs.find((t) => t.id === tabId);
+    if (!tab) return;
+    setActiveTabId(tabId);
+    setDocumentPath(tab.path);
+    setEditorValue(tab.editorValue);
+  };
+
+  const closeTab = (tabId, event) => {
+    if (event) event.stopPropagation();
+    setTabs((prev) => {
+      const index = prev.findIndex((t) => t.id === tabId);
+      if (index < 0) return prev;
+      const next = prev.filter((t) => t.id !== tabId);
+      if (activeTabId === tabId) {
+        const fallback = next[Math.max(0, index - 1)] || next[0];
+        if (fallback) {
+          setActiveTabId(fallback.id);
+          setDocumentPath(fallback.path);
+          setEditorValue(fallback.editorValue);
+        } else {
+          setActiveTabId(null);
+          setDocumentPath("");
+          setEditorValue(DEFAULT_EDITOR_VALUE);
+        }
+      }
+      return next;
+    });
   };
 
   const probeSubCollections = async (path) => {
@@ -777,7 +891,7 @@ const App = () => {
             if (snapshot.docs.length > 0) {
               cursorRef.current = snapshot.docs[snapshot.docs.length - 1];
             }
-            setCollectionStatus(createMessageState(`Live: ${nextDocuments.length} document(s).`, "info"));
+            setCollectionStatus(createMessageState(`Live: ${pluralize(nextDocuments.length, "document")}.`, "info"));
           },
           (error) => setCollectionStatus(createMessageState(error.message, "error"))
         );
@@ -797,7 +911,16 @@ const App = () => {
       if (snapshot.docs.length > 0) {
         cursorRef.current = snapshot.docs[snapshot.docs.length - 1];
       }
-      setCollectionStatus(createMessageState(`Loaded ${nextDocuments.length} document(s) from "${collectionPath.trim()}".`, "success"));
+      setCollectionStatus(createMessageState(`Loaded ${pluralize(nextDocuments.length, "document")} from "${collectionPath.trim()}".`, "success"));
+
+      pushQueryHistory({
+        collection: collectionPath.trim(),
+        limit: Math.max(1, Number(collectionLimit) || 20),
+        where: whereClauses.filter((c) => c.field.trim()),
+        orderBy: orderByField.trim(),
+        dir: orderByDir,
+        at: Date.now()
+      });
 
       if (nextDocuments.length > 0) {
         loadDocumentIntoEditor(nextDocuments[0].path, nextDocuments[0].data, "cached document");
@@ -899,7 +1022,7 @@ const App = () => {
       setShowGlobalResults(true);
       setGlobalSearchStatus(
         createMessageState(
-          `Global scan finished. ${matches.length} match(es) found after scanning ${scanned} document(s) in "${collectionPath.trim()}".`,
+          `Global scan finished. ${pluralize(matches.length, "match", "matches")} after scanning ${pluralize(scanned, "document")} in "${collectionPath.trim()}".`,
           "success"
         )
       );
@@ -1167,10 +1290,15 @@ const App = () => {
       const text = await file.text();
       const parsed = JSON.parse(text);
       const items = Array.isArray(parsed) ? parsed : [parsed];
-      if (!window.confirm(`Import ${items.length} document(s) into "${collectionPath.trim()}"?`)) return;
+      const ok = await confirmAction({
+        title: "Import documents",
+        message: `Import ${pluralize(items.length, "document")} into "${collectionPath.trim()}"?`,
+        confirmLabel: "Import"
+      });
+      if (!ok) return;
 
       setLoadingCollection(true);
-      let ok = 0;
+      let imported = 0;
       for (const item of items) {
         const data = parseEditorValue(item.data || item, db);
         if (item.id && typeof item.id === "string") {
@@ -1178,9 +1306,9 @@ const App = () => {
         } else {
           await addDoc(collection(db, collectionPath.trim()), data);
         }
-        ok += 1;
+        imported += 1;
       }
-      setCollectionStatus(createMessageState(`Imported ${ok}/${items.length}.`, "success"));
+      setCollectionStatus(createMessageState(`Imported ${imported}/${items.length}.`, "success"));
       await handleLoadCollection();
     } catch (error) {
       setCollectionStatus(createMessageState(error.message || "Import failed.", "error"));
@@ -1258,9 +1386,15 @@ curl -X POST "https://firestore.googleapis.com/v1/projects/${projectIdForRest}/d
     setCopyMenuOpen(false);
   };
 
-  const handleSaveConnection = () => {
+  const handleSaveConnection = async () => {
     const defaultName = projectId || "connection";
-    const name = window.prompt("Save connection as:", defaultName);
+    const name = await promptAction({
+      title: "Save connection",
+      message: "Give this Firebase config a nickname so you can switch back to it later.",
+      placeholder: "e.g. staging, prod, personal",
+      defaultValue: defaultName,
+      confirmLabel: "Save"
+    });
     if (!name) return;
     const nextList = [
       ...savedConnections.filter((c) => c.name !== name),
@@ -1276,8 +1410,14 @@ curl -X POST "https://firestore.googleapis.com/v1/projects/${projectIdForRest}/d
     setConnectionStatus(createMessageState(`Loaded "${entry.name}". Click Reconnect.`, "info"));
   };
 
-  const handleDeleteSavedConnection = (name) => {
-    if (!window.confirm(`Delete saved connection "${name}"?`)) return;
+  const handleDeleteSavedConnection = async (name) => {
+    const ok = await confirmAction({
+      title: "Delete saved connection",
+      message: `Delete saved connection "${name}"?`,
+      confirmLabel: "Delete",
+      variant: "danger"
+    });
+    if (!ok) return;
     const nextList = savedConnections.filter((c) => c.name !== name);
     setSavedConnections(nextList);
     writeSavedConnections(nextList);
@@ -1295,6 +1435,107 @@ curl -X POST "https://firestore.googleapis.com/v1/projects/${projectIdForRest}/d
     setWhereClauses((prev) => prev.filter((_, i) => i !== index));
   };
 
+  const pushQueryHistory = (entry) => {
+    setQueryHistory((prev) => {
+      const signature = JSON.stringify({
+        c: entry.collection, w: entry.where, o: entry.orderBy, d: entry.dir, l: entry.limit
+      });
+      const filtered = prev.filter((item) => JSON.stringify({
+        c: item.collection, w: item.where, o: item.orderBy, d: item.dir, l: item.limit
+      }) !== signature);
+      const next = [entry, ...filtered].slice(0, MAX_QUERY_HISTORY);
+      writeQueryHistory(next);
+      return next;
+    });
+  };
+
+  const restoreQueryFromHistory = (entry) => {
+    setCollectionPath(entry.collection);
+    setCollectionLimit(entry.limit);
+    setWhereClauses(entry.where.map((c) => ({ ...c })));
+    setOrderByField(entry.orderBy || "");
+    setOrderByDir(entry.dir || "asc");
+  };
+
+  const clearQueryHistory = async () => {
+    if (!queryHistory.length) return;
+    const ok = await confirmAction({
+      title: "Clear query history",
+      message: "Remove all recent queries from this browser?",
+      confirmLabel: "Clear",
+      variant: "danger"
+    });
+    if (!ok) return;
+    setQueryHistory([]);
+    writeQueryHistory([]);
+  };
+
+  const describeHistoryEntry = (entry) => {
+    const parts = [entry.collection];
+    entry.where.forEach((clause) => {
+      parts.push(`${clause.field} ${clause.op} ${clause.value}`);
+    });
+    if (entry.orderBy) parts.push(`order ${entry.orderBy} ${entry.dir}`);
+    parts.push(`limit ${entry.limit}`);
+    return parts.join(" · ");
+  };
+
+  const toggleSelectDoc = (path) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+  };
+
+  const toggleSelectAll = () => {
+    const visible = renderedDocuments.map((item) => item.path);
+    setSelectedIds((prev) => {
+      const allSelected = visible.length > 0 && visible.every((p) => prev.has(p));
+      if (allSelected) {
+        const next = new Set(prev);
+        visible.forEach((p) => next.delete(p));
+        return next;
+      }
+      const next = new Set(prev);
+      visible.forEach((p) => next.add(p));
+      return next;
+    });
+  };
+
+  const clearSelection = () => setSelectedIds(new Set());
+
+  const handleBulkDelete = async () => {
+    if (!db || selectedIds.size === 0) return;
+    const paths = Array.from(selectedIds);
+    const ok = await confirmAction({
+      title: "Bulk delete",
+      message: `Delete ${pluralize(paths.length, "document")}? This cannot be undone.`,
+      confirmLabel: `Delete ${paths.length}`,
+      variant: "danger"
+    });
+    if (!ok) return;
+
+    setSavingDocument(true);
+    try {
+      const CHUNK = 450;
+      for (let i = 0; i < paths.length; i += CHUNK) {
+        const chunk = paths.slice(i, i + CHUNK);
+        const batch = writeBatch(db);
+        chunk.forEach((p) => batch.delete(doc(db, p)));
+        await batch.commit();
+      }
+      setDocumentStatus(createMessageState(`Deleted ${pluralize(paths.length, "document")}.`, "success"));
+      clearSelection();
+      await handleLoadCollection();
+    } catch (error) {
+      setDocumentStatus(createMessageState(error.message || "Bulk delete failed.", "error"));
+    } finally {
+      setSavingDocument(false);
+    }
+  };
+
   const handleDeleteDocument = async () => {
     if (!db) {
       setDocumentStatus(createMessageState("Connect to Firebase first.", "error"));
@@ -1306,9 +1547,13 @@ curl -X POST "https://firestore.googleapis.com/v1/projects/${projectIdForRest}/d
       return;
     }
 
-    if (!window.confirm(`Delete document "${documentPath.trim()}"?`)) {
-      return;
-    }
+    const confirmed = await confirmAction({
+      title: "Delete document",
+      message: `Permanently delete "${documentPath.trim()}"?`,
+      confirmLabel: "Delete",
+      variant: "danger"
+    });
+    if (!confirmed) return;
 
     setSavingDocument(true);
     setDocumentStatus(createMessageState("", ""));
@@ -1614,7 +1859,7 @@ curl -X POST "https://firestore.googleapis.com/v1/projects/${projectIdForRest}/d
           checked={liveMode}
           onChange={(event) => setLiveMode(event.target.checked)}
         />
-        <span>Live updates (onSnapshot)</span>
+        <span>Live updates</span>
       </label>
       {discoveredCollections.length > 0 && (
         <div className="pg-chips pg-chips-found">
@@ -1636,7 +1881,7 @@ curl -X POST "https://firestore.googleapis.com/v1/projects/${projectIdForRest}/d
           onClick={handleLoadCollection}
           disabled={loadingCollection}
         >
-          {loadingCollection ? "Loading\u2026" : "\u25B6  Run Query"}
+          {loadingCollection ? "Loading\u2026" : "Run Query"}
         </button>
       </div>
       {hasMore && !liveMode && (
@@ -1729,6 +1974,34 @@ curl -X POST "https://firestore.googleapis.com/v1/projects/${projectIdForRest}/d
           </div>
         </>
       )}
+
+      {queryHistory.length > 0 && (
+        <>
+          <div className="pg-divider" />
+          <label className="pg-label">
+            Recent queries
+            <button className="pg-mini-btn" onClick={clearQueryHistory}>clear</button>
+          </label>
+          <div className="history-list">
+            {queryHistory.map((entry, index) => (
+              <button
+                key={`${entry.at}-${index}`}
+                className="history-item"
+                onClick={() => restoreQueryFromHistory(entry)}
+                title={describeHistoryEntry(entry)}
+              >
+                <span className="history-coll">{entry.collection}</span>
+                {entry.where.length > 0 && (
+                  <span className="history-meta">{entry.where.length} where</span>
+                )}
+                {entry.orderBy && (
+                  <span className="history-meta">order {entry.orderBy}</span>
+                )}
+              </button>
+            ))}
+          </div>
+        </>
+      )}
     </div>
   );
 
@@ -1816,6 +2089,185 @@ curl -X POST "https://firestore.googleapis.com/v1/projects/${projectIdForRest}/d
     </div>
   );
 
+  const parsedEditorForTree = (() => {
+    try {
+      return JSON.parse(editorValue || "{}");
+    } catch {
+      return null;
+    }
+  })();
+
+  const updateParsedAtPath = (root, pathKeys, newValue) => {
+    if (pathKeys.length === 0) return newValue;
+    const key = pathKeys[0];
+    const rest = pathKeys.slice(1);
+    if (Array.isArray(root)) {
+      const clone = [...root];
+      clone[key] = updateParsedAtPath(clone[key], rest, newValue);
+      return clone;
+    }
+    return { ...root, [key]: updateParsedAtPath(root?.[key], rest, newValue) };
+  };
+
+  const deleteParsedAtPath = (root, pathKeys) => {
+    if (pathKeys.length === 0) return root;
+    const key = pathKeys[0];
+    const rest = pathKeys.slice(1);
+    if (rest.length === 0) {
+      if (Array.isArray(root)) {
+        return root.filter((_, i) => i !== Number(key));
+      }
+      const { [key]: _removed, ...rest2 } = root;
+      return rest2;
+    }
+    if (Array.isArray(root)) {
+      const clone = [...root];
+      clone[key] = deleteParsedAtPath(clone[key], rest);
+      return clone;
+    }
+    return { ...root, [key]: deleteParsedAtPath(root?.[key], rest) };
+  };
+
+  const commitTreeEdit = (next) => {
+    setEditorValue(JSON.stringify(next, null, 2));
+  };
+
+  const TreeNode = ({ value, pathKeys, label, isLast }) => {
+    const [expanded, setExpanded] = useState(true);
+    const [editing, setEditing] = useState(false);
+    const [draft, setDraft] = useState("");
+
+    const isTyped = isPlainObject(value) && typeof value.__type === "string";
+    const typeLabel = isTyped ? value.__type : null;
+
+    const isObject = isPlainObject(value) && !isTyped;
+    const isArray = Array.isArray(value);
+    const isContainer = isObject || isArray;
+
+    const startEdit = () => {
+      setDraft(typeof value === "string" ? value : JSON.stringify(value));
+      setEditing(true);
+    };
+
+    const saveEdit = () => {
+      let parsed;
+      try {
+        parsed = JSON.parse(draft);
+      } catch {
+        parsed = draft;
+      }
+      commitTreeEdit(updateParsedAtPath(parsedEditorForTree, pathKeys, parsed));
+      setEditing(false);
+    };
+
+    const handleDelete = () => {
+      commitTreeEdit(deleteParsedAtPath(parsedEditorForTree, pathKeys));
+    };
+
+    const renderValue = () => {
+      if (editing) {
+        return (
+          <>
+            <input
+              className="tree-input"
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") saveEdit();
+                if (e.key === "Escape") setEditing(false);
+              }}
+              autoFocus
+            />
+            <button className="tree-mini-btn" onClick={saveEdit}>save</button>
+            <button className="tree-mini-btn" onClick={() => setEditing(false)}>cancel</button>
+          </>
+        );
+      }
+
+      if (value === null) return <span className="tree-val tree-null">null</span>;
+      if (typeof value === "boolean") return <span className="tree-val tree-bool">{String(value)}</span>;
+      if (typeof value === "number") return <span className="tree-val tree-num">{value}</span>;
+      if (typeof value === "string") return <span className="tree-val tree-str">"{value}"</span>;
+      if (typeLabel) {
+        return <span className="tree-val tree-typed">{typeLabel}: {JSON.stringify(value).slice(0, 80)}</span>;
+      }
+      if (isArray) return <span className="tree-val tree-muted">[{value.length}]</span>;
+      if (isObject) return <span className="tree-val tree-muted">{`{${Object.keys(value).length}}`}</span>;
+      return String(value);
+    };
+
+    return (
+      <div className={`tree-node ${isLast ? "is-last" : ""}`}>
+        <div className="tree-row">
+          {isContainer ? (
+            <button
+              className="tree-toggle"
+              onClick={() => setExpanded(!expanded)}
+              aria-label={expanded ? "Collapse" : "Expand"}
+            >
+              {expanded ? "\u25BE" : "\u25B8"}
+            </button>
+          ) : (
+            <span className="tree-toggle-spacer" />
+          )}
+          <span className="tree-key">{label}</span>
+          <span className="tree-colon">:</span>
+          {renderValue()}
+          {!editing && !isContainer && (
+            <div className="tree-actions">
+              <button className="tree-mini-btn" onClick={startEdit} title="Edit">edit</button>
+              <button className="tree-mini-btn tree-del" onClick={handleDelete} title="Delete">{"\u00D7"}</button>
+            </div>
+          )}
+          {!editing && isContainer && pathKeys.length > 0 && (
+            <div className="tree-actions">
+              <button className="tree-mini-btn tree-del" onClick={handleDelete} title="Delete">{"\u00D7"}</button>
+            </div>
+          )}
+        </div>
+        {isContainer && expanded && (
+          <div className="tree-children">
+            {(isArray ? value : Object.entries(value)).map((entry, index) => {
+              const childKey = isArray ? index : entry[0];
+              const childValue = isArray ? entry : entry[1];
+              const childLast = index === (isArray ? value.length - 1 : Object.entries(value).length - 1);
+              return (
+                <TreeNode
+                  key={childKey}
+                  label={String(childKey)}
+                  value={childValue}
+                  pathKeys={[...pathKeys, childKey]}
+                  isLast={childLast}
+                />
+              );
+            })}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  const renderTreeEditor = () => {
+    if (!parsedEditorForTree) {
+      return <div className="pg-empty">Invalid JSON. Switch to JSON mode to fix.</div>;
+    }
+    const entries = Object.entries(parsedEditorForTree);
+    if (!entries.length) return <div className="pg-empty">Empty object. Switch to JSON to add fields.</div>;
+    return (
+      <div className="tree-root">
+        {entries.map(([key, val], i) => (
+          <TreeNode
+            key={key}
+            label={key}
+            value={val}
+            pathKeys={[key]}
+            isLast={i === entries.length - 1}
+          />
+        ))}
+      </div>
+    );
+  };
+
   const renderDiffModal = () => {
     if (!pendingWrite) return null;
     const { kind, targetPath, diff } = pendingWrite;
@@ -1871,10 +2323,60 @@ curl -X POST "https://firestore.googleapis.com/v1/projects/${projectIdForRest}/d
     );
   };
 
+  const renderDialog = () => {
+    if (!dialog) return null;
+    const isPrompt = dialog.kind === "prompt";
+    const confirmClass = dialog.variant === "danger" ? "btn btn-danger-solid" : "btn btn-primary";
+    return (
+      <div className="pg-modal-scrim" onClick={dialog.onCancel}>
+        <div className="pg-modal pg-modal-sm" onClick={(e) => e.stopPropagation()}>
+          <div className="pg-modal-head">
+            <div>
+              <div className="pg-modal-kicker">{dialog.variant === "danger" ? "Danger" : "Confirm"}</div>
+              <div className="pg-modal-title">{dialog.title}</div>
+            </div>
+            <button className="icon-btn icon-btn-plain" onClick={dialog.onCancel} aria-label="Close">
+              {"\u00D7"}
+            </button>
+          </div>
+          <div className="pg-modal-body pg-dialog-body">
+            <div className="pg-dialog-msg">{dialog.message}</div>
+            {isPrompt && (
+              <input
+                className="pg-input pg-dialog-input"
+                placeholder={dialog.placeholder}
+                value={promptValue}
+                onChange={(e) => setPromptValue(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") dialog.onConfirm(promptValue.trim());
+                  if (e.key === "Escape") dialog.onCancel();
+                }}
+                autoFocus
+              />
+            )}
+          </div>
+          <div className="pg-modal-foot">
+            <button className="btn btn-ghost" onClick={dialog.onCancel}>
+              {dialog.cancelLabel || "Cancel"}
+            </button>
+            <button
+              className={confirmClass}
+              onClick={() => dialog.onConfirm(isPrompt ? promptValue.trim() : true)}
+              disabled={isPrompt && !promptValue.trim()}
+            >
+              {dialog.confirmLabel}
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
   return (
     <div className={`pg-shell theme-${theme}`}>
       {renderTopbar()}
       {renderDiffModal()}
+      {renderDialog()}
       <main className="pg-workspace">
         <aside className={`pg-sidebar ${sidebarOpen ? "open" : ""}`}>
           {renderSidebarTabs()}
@@ -1955,19 +2457,58 @@ curl -X POST "https://firestore.googleapis.com/v1/projects/${projectIdForRest}/d
 
           <div className={`pg-split ${resultsCollapsed ? "collapsed" : ""}`}>
             <div className="pg-panel pg-editor">
+              {tabs.length > 0 && (
+                <div className="pg-tabstrip">
+                  {tabs.map((tab) => (
+                    <div
+                      key={tab.id}
+                      className={`pg-doctab ${activeTabId === tab.id ? "active" : ""}`}
+                      onClick={() => switchTab(tab.id)}
+                      title={tab.path}
+                    >
+                      <span className="pg-doctab-label">{tab.path.split("/").pop()}</span>
+                      <button
+                        className="pg-doctab-close"
+                        onClick={(e) => closeTab(tab.id, e)}
+                        aria-label="Close tab"
+                      >
+                        {"\u00D7"}
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
               <div className="pg-panel-head">
                 <span className="pg-panel-title">
-                  <span className="pg-dot json" /> JSON Payload
+                  <span className="pg-dot json" />
+                  {editorMode === "json" ? "JSON Payload" : "Tree Editor"}
                 </span>
-                <span className="pg-panel-meta">{documentPath || "untitled"}</span>
+                <div className="pg-editor-mode">
+                  <button
+                    className={`pg-mode-btn ${editorMode === "json" ? "active" : ""}`}
+                    onClick={() => setEditorMode("json")}
+                  >
+                    JSON
+                  </button>
+                  <button
+                    className={`pg-mode-btn ${editorMode === "tree" ? "active" : ""}`}
+                    onClick={() => setEditorMode("tree")}
+                  >
+                    Tree
+                  </button>
+                </div>
               </div>
-              <textarea
-                className="pg-code-area pg-editor-area"
-                value={editorValue}
-                onChange={(event) => setEditorValue(event.target.value)}
-                placeholder="{}"
-                spellCheck={false}
-              />
+              {editorMode === "json" ? (
+                <textarea
+                  className="pg-code-area pg-editor-area"
+                  value={editorValue}
+                  onChange={(event) => setEditorValue(event.target.value)}
+                  placeholder="{}"
+                  spellCheck={false}
+                />
+              ) : (
+                <div className="pg-tree-area">{renderTreeEditor()}</div>
+              )}
               <div className="pg-editor-foot">
                 <details>
                   <summary>Type helpers</summary>
@@ -2036,6 +2577,33 @@ curl -X POST "https://firestore.googleapis.com/v1/projects/${projectIdForRest}/d
                     {"\u203A"}
                   </button>
                 </div>
+                {renderedDocuments.length > 0 && (
+                  <div className="pg-selbar">
+                    <label className="pg-selbar-check">
+                      <input
+                        type="checkbox"
+                        checked={renderedDocuments.every((item) => selectedIds.has(item.path))}
+                        onChange={toggleSelectAll}
+                      />
+                      <span>Select all</span>
+                    </label>
+                    {selectedIds.size > 0 && (
+                      <>
+                        <span className="pg-selbar-count">{selectedIds.size} selected</span>
+                        <button
+                          className="btn btn-danger btn-sm"
+                          onClick={handleBulkDelete}
+                          disabled={savingDocument}
+                        >
+                          Delete
+                        </button>
+                        <button className="btn btn-ghost btn-sm" onClick={clearSelection}>
+                          Clear
+                        </button>
+                      </>
+                    )}
+                  </div>
+                )}
                 <div className="pg-results-list">
                   {renderedDocuments.length === 0 ? (
                     <div className="pg-empty">
@@ -2047,18 +2615,29 @@ curl -X POST "https://firestore.googleapis.com/v1/projects/${projectIdForRest}/d
                     </div>
                   ) : (
                     renderedDocuments.map((item) => (
-                      <button
+                      <div
                         key={item.path}
-                        className={`doc-card ${documentPath === item.path ? "selected" : ""}`}
-                        onClick={() => loadDocumentIntoEditor(item.path, item.data, "cached document")}
+                        className={`doc-card ${documentPath === item.path ? "selected" : ""} ${selectedIds.has(item.path) ? "checked" : ""}`}
                       >
-                        <div className="doc-card-top">
-                          <strong>{getDocumentTitle(item)}</strong>
-                          <span className="doc-id">{item.id}</span>
-                        </div>
-                        <div className="doc-path">{item.path}</div>
-                        <div className="doc-preview">{getDocumentPreview(item.data)}</div>
-                      </button>
+                        <label className="doc-check" onClick={(e) => e.stopPropagation()}>
+                          <input
+                            type="checkbox"
+                            checked={selectedIds.has(item.path)}
+                            onChange={() => toggleSelectDoc(item.path)}
+                          />
+                        </label>
+                        <button
+                          className="doc-card-body"
+                          onClick={() => loadDocumentIntoEditor(item.path, item.data, "cached document")}
+                        >
+                          <div className="doc-card-top">
+                            <strong>{getDocumentTitle(item)}</strong>
+                            <span className="doc-id">{item.id}</span>
+                          </div>
+                          <div className="doc-path">{item.path}</div>
+                          <div className="doc-preview">{getDocumentPreview(item.data)}</div>
+                        </button>
+                      </div>
                     ))
                   )}
                 </div>
